@@ -508,7 +508,7 @@ async function main() {
   // Prepare prompt for LLM
   const skillNames = allSkills.slice(0, 50).map(s => s.name).join(", ");
   const prompt = `
-Given activity summary:
+Given GitHub activity summary:
 
 Languages & %:
 ${langPercentages}
@@ -538,7 +538,7 @@ You MUST respond with **ONLY** a valid JSON array — nothing before it, nothing
 Example (do NOT copy):
 [{"name":"Angular Components","score":92,"reason":"Many @angular/* packages and .ts files"},{"name":"UI/UX Research","score":78,"reason":"Tailwind + Radix UI usage across repos"}]
 
-Your response begins and ends with the JSON array:
+Your response begins and ends with the JSON array
 `;
 
   console.log("Querying LLM for skill recommendations...");
@@ -561,11 +561,11 @@ Your response begins and ends with the JSON array:
       model: HF_MODEL,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.3,
-      max_tokens: 1200, // adjust based on needs (gpt-oss-120b supports long context)
+      max_tokens: 2000, // adjust based on needs (gpt-oss-120b supports long context)
       stream: false,
     });
 
-    llmResponse = completion.choices[0]?.message?.content || "";
+    llmResponse = completion.choices[0].message.content || "";
   } else if (LLM_PROVIDER === "ollama") {
     const ollamaResponse = await axios.post(`${OLLAMA_URL}/api/chat`, {
       model: "llama2", // or your preferred model
@@ -659,7 +659,7 @@ Your response begins and ends with the JSON array:
 
   // Run summary
   console.log("\nRun Summary:");
-  console.log(`Repos scanned: ${repoAnalyses.length}`);
+  console.log(`Repos scanned: ${Object.keys(repoAnalyses).length}`);
   console.log(
     `Contributions inspected: ${totalCommits} commits, ${totalPRs} PRs`
   );

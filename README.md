@@ -31,7 +31,7 @@ npm install typescript axios dotenv openai @types/node ts-node
 ```
 MAX_REPOS_TO_ANALYZE=max_number_of_repos_to_analyze
 GITHUB_CLIENT_ID=your_github_oauth_client_id
-GITHUB_ACCESS_TOKEN=paste the token here after first run
+GITHUB_ACCESS_TOKEN=reuse_token_after_first_run (skip browser auth)
 LLM_PROVIDER=huggingface_router  # or 'ollama'
 HUGGINGFACE_TOKEN=your_huggingface_token  # Required if using hf
 HF_MODEL=your_huggingface_token # eq: openai/gpt-oss-120b:cheapest
@@ -119,8 +119,15 @@ npm run dev
 - **Documentation** — detailed README + inline comments
 - Should pass basic SAST/vulnerability scans (no secrets hardcoded, standard deps)
 
-## Limitations & Possible Improvements
-- Dependency parsing is basic (can be extended for Cargo.toml, go.mod, etc.)
-- Evidence links are sampled (to avoid huge prompts)
-- No resume-from-checkpoint (full run each time)
-- LLM output parsing is simple — could add retry/fallback logic
+### LLM & Model Notes / Limitations
+- The app uses Hugging Face's Inference Router (OpenAI-compatible endpoint) for skill recommendations.
+- Model is configurable via `HF_MODEL` in `.env` (default: `openai/gpt-oss-120b:groq` or similar).
+- **Large models** (e.g. 120B-class like gpt-oss-120b) sometimes truncate output or fail to produce clean JSON on long prompts → the app includes aggressive parsing/cleaning to recover most recommendations.
+- **Recommendation**: For best reliability, use smaller, instruction-tuned models such as:
+  - `meta-llama/Llama-3.2-3B-Instruct`
+  - `mistralai/Mistral-Nemo-Instruct-2407:novita`
+- If recommendations are empty or incomplete, try:
+  - Reducing `MAX_REPOS_TO_ANALYZE=5` (or 3–8) in `.env`
+  - Switching to a smaller model above
+  - Running with Ollama locally (set `LLM_PROVIDER=ollama` + pull `llama3.1:8b`)
+- This is a known quirk of routed open-source inference — parsing fallback ensures partial results even on imperfect outputs.
