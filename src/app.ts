@@ -1,340 +1,412 @@
 import axios, { AxiosInstance, AxiosResponse } from "axios";
 import * as dotenv from "dotenv";
 import OpenAI from "openai";
+import { Ollama } from "ollama";
 import * as path from "path";
+import * as fs from "fs/promises";
 import { promisify } from "util";
-const sleep = promisify(setTimeout);
 
+const sleep = promisify(setTimeout);
 dotenv.config();
 
-const max_repos = process.env.MAX_REPOS_TO_ANALYZE;
-const MAX_REPOS_TO_ANALYZE = max_repos
-  ? Math.max(1, Math.min(100, parseInt(max_repos, 10)))
-  : 10;
+// ── Configuration & Constants ───────────────────────────────────────────────
+const CACHE_DIR = path.join(process.cwd(), ".cache");
+const SKILLS_CACHE_FILE = path.join(CACHE_DIR, "topcoder-skills.json");
+const getUserCacheFile = (username: string | undefined) =>
+  path.join(
+    CACHE_DIR,
+    username ? `github-${username.toLowerCase()}.json` : "github-unknown.json"
+  );
+
+const MAX_REPOS_TO_ANALYZE = (() => {
+  const val = process.env.MAX_REPOS_TO_ANALYZE;
+  return val ? Math.max(1, Math.min(100, parseInt(val, 10))) : 10;
+})();
+
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const LLM_PROVIDER = process.env.LLM_PROVIDER;
 const HUGGINGFACE_TOKEN = process.env.HUGGINGFACE_TOKEN;
-const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
+const OLLAMA_API_KEY = process.env.OLLAMA_API_KEY;
 
-if (!GITHUB_CLIENT_ID) {
-  throw new Error("GITHUB_CLIENT_ID is required in .env");
-}
-
+if (!GITHUB_CLIENT_ID) throw new Error("GITHUB_CLIENT_ID is required in .env");
 if (LLM_PROVIDER === "huggingface_router" && !HUGGINGFACE_TOKEN) {
-  throw new Error("HUGGINGFACE_TOKEN is required for huggingface provider");
+  throw new Error("HUGGINGFACE_TOKEN is required for huggingface_router");
+}
+if (LLM_PROVIDER === "ollama_cloud" && !OLLAMA_API_KEY) {
+  throw new Error("OLLAMA API KEY is required for ollama_cloud");
 }
 
+// ── Types ────────────────────────────────────────────────────────────────────
 interface Skill {
   id: string;
   name: string;
 }
-
 interface Recommendation {
   id: string;
   name: string;
   score: number;
   info: string;
 }
+interface RepoAnalysis {
+  languages: Record<string, number>;
+  dependencies: Set<string>;
+  fileTypes: Set<string>;
+  commitCount: number;
+  prCount: number;
+  evidence: string[];
+}
+interface CachedUserAnalysis {
+  timestamp: string;
+  username: string;
+  reposCount: number;
+  analyzedRepos: number;
+  totalCommits: number;
+  totalPRs: number;
+  langPercentages: string[];
+  topDependencies: string[];
+  topFileTypes: string[];
+  allEvidenceLinks: string[];
+  reposToAnalyze: string[];
+}
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+async function ensureCacheDir() {
+  await fs.mkdir(CACHE_DIR, { recursive: true }).catch(() => {});
+}
+
+function getApiCallsCounter() {
+  let count = 0;
+  return {
+    increment: () => count++,
+    get: () => count,
+  };
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
   const startTime = Date.now();
-  let apiCalls = 0;
-  let searchCalls = 0;
+  const apiCalls = getApiCallsCounter();
+  const searchCalls = getApiCallsCounter();
 
-  // ── Try to use existing token from .env first ───────────────────────────────
-  let accessToken = process.env.GITHUB_ACCESS_TOKEN?.trim();
+  await ensureCacheDir();
 
-  if (accessToken) {
-    console.log(
-      "Using existing GitHub access token from .env (skipping browser authentication)"
-    );
-  } else {
-    // ── Full Device Flow Authentication ───────────────────────────────────────
-    console.log("Initiating GitHub authentication...");
-    const codeResponse = await axios.post(
-      "https://github.com/login/device/code",
-      { client_id: GITHUB_CLIENT_ID, scope: "user repo" },
-      { headers: { Accept: "application/json" } }
-    );
-    apiCalls++;
+  // 1. Authenticate
+  const accessToken = await authenticateGitHub(apiCalls);
+  const github = createGitHubClient(accessToken, apiCalls);
 
-    const { device_code, user_code, verification_uri, interval, expires_in } =
-      codeResponse.data;
+  // 2. Get username
+  const username = await getUsername(github, apiCalls);
+  console.log(`Analyzing @${username}\n`);
 
-    console.log(`\nPlease go to: ${verification_uri}`);
-    console.log(`Enter this code: ${user_code}\n`);
+  // 3. Load or fetch Topcoder skills (cached)
+  const allSkills = await loadOrFetchSkills(apiCalls);
 
-    let authSuccess = false;
-    const authStart = Date.now();
+  // 4. Load or compute GitHub analysis (cached)
+  const analysis = await loadOrComputeAnalysis(
+    github,
+    username,
+    apiCalls,
+    searchCalls
+  );
 
-    while (!authSuccess && Date.now() - authStart < expires_in * 1000) {
-      await sleep(interval * 1000);
-      try {
-        const tokenResponse = await axios.post(
-          "https://github.com/login/oauth/access_token",
-          {
-            client_id: GITHUB_CLIENT_ID,
-            device_code,
-            grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-          },
-          { headers: { Accept: "application/json" } }
-        );
-        apiCalls++;
+  // 5. Build prompt
+  const sampleSize = parseInt(process.env.EVIDENCE_SAMPLE_SIZE || "12", 10);
+  const evidenceSample = getFreshEvidenceSample(
+    analysis.allEvidenceLinks,
+    sampleSize
+  );
+  const prompt = buildPrompt({ ...analysis, evidenceSample }, allSkills);
 
-        const data = tokenResponse.data;
-        if (data.access_token) {
-          accessToken = data.access_token;
-          authSuccess = true;
+  // 6. Call LLM
+  console.log(`Querying LLM using ${process.env.HF_MODEL}...`);
+  console.log(`Prompt: ${prompt}`);
+  console.log(
+    `Prompt length: ${prompt.length} chars (~${Math.round(
+      prompt.length / 4
+    )} tokens)`
+  );
+  const llmResponse = await callLLM(prompt);
 
-          // Print the token so user can copy-paste it into .env
-          console.log(
-            "\n╔════════════════════════════════════════════════════════════╗"
-          );
-          console.log(
-            "║               AUTHENTICATION SUCCESSFUL                    ║"
-          );
-          console.log(
-            "║                                                            ║"
-          );
-          console.log(
-            `║  Your GitHub Access Token:                                 ║`
-          );
-          console.log(`║  ${accessToken}  ║`);
-          console.log(
-            "║                                                            ║"
-          );
-          console.log(
-            "║  Copy the token above and add it to your .env file like:   ║"
-          );
-          console.log(
-            "║  GITHUB_ACCESS_TOKEN=ghu_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx    ║"
-          );
-          console.log(
-            "║  Future runs will skip this step until the token expires.  ║"
-          );
-          console.log(
-            "╚════════════════════════════════════════════════════════════╝\n"
-          );
-        } else if (data.error !== "authorization_pending") {
-          throw new Error(data.error_description || "Authentication failed");
-        }
-      } catch (err: any) {
-        console.error("Polling error:", err.message);
+  // 7. Parse & display results
+  const recommendations = parseAndMapRecommendations(llmResponse, allSkills);
+  displayResults(
+    recommendations,
+    analysis,
+    apiCalls.get() + searchCalls.get(),
+    startTime
+  );
+}
+
+// ── Authenticate ─────────────────────────────────────────────────────────────
+async function authenticateGitHub(
+  apiCalls: ReturnType<typeof getApiCallsCounter>
+): Promise<string> {
+  let token = process.env.GITHUB_ACCESS_TOKEN?.trim();
+
+  if (token) {
+    console.log("Using cached GitHub token from .env");
+    return token;
+  }
+
+  console.log("Initiating GitHub device flow authentication...");
+  const codeRes = await axios.post(
+    "https://github.com/login/device/code",
+    { client_id: GITHUB_CLIENT_ID, scope: "user repo" },
+    { headers: { Accept: "application/json" } }
+  );
+  apiCalls.increment();
+
+  const { device_code, user_code, verification_uri, interval, expires_in } =
+    codeRes.data;
+
+  console.log(`\n→ Go to: ${verification_uri}`);
+  console.log(`→ Code: ${user_code}\n`);
+
+  const start = Date.now();
+  while (Date.now() - start < expires_in * 1000) {
+    await sleep(interval * 1000);
+    try {
+      const tokenRes = await axios.post(
+        "https://github.com/login/oauth/access_token",
+        {
+          client_id: GITHUB_CLIENT_ID,
+          device_code,
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        },
+        { headers: { Accept: "application/json" } }
+      );
+      apiCalls.increment();
+
+      const data = tokenRes.data;
+      if (data.access_token) {
+        console.log("\nAuthentication successful!");
+        console.log(`Token (add to .env): ${data.access_token}`);
+        return data.access_token;
       }
-    }
-
-    if (!accessToken) {
-      throw new Error("Authentication timed out or failed");
+    } catch (err: any) {
+      console.error("Polling error:", err.message);
     }
   }
 
-  // ── Create GitHub client with the token ─────────────────────────────────────
-  const github: AxiosInstance = axios.create({
+  throw new Error("Authentication timed out or failed");
+}
+
+// ── Create GitHub client with rate limiting ─────────────────────────────────
+function createGitHubClient(
+  token: string,
+  apiCalls: ReturnType<typeof getApiCallsCounter>
+) {
+  const client = axios.create({
     baseURL: "https://api.github.com",
     headers: {
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github.v3+json",
     },
   });
 
-  github.interceptors.response.use(async (res: AxiosResponse) => {
-    apiCalls++;
+  client.interceptors.response.use(async (res) => {
+    apiCalls.increment();
     const remaining = parseInt(res.headers["x-ratelimit-remaining"] || "0", 10);
     const reset = parseInt(res.headers["x-ratelimit-reset"] || "0", 10);
     if (remaining < 10 && reset > 0) {
-      const waitMs = reset * 1000 - Date.now() + 2000;
-      if (waitMs > 0) {
-        console.log(
-          `Core API rate limit low (${remaining} left). Waiting ~${Math.round(
-            waitMs / 1000
-          )}s...`
-        );
-        await sleep(waitMs);
+      const wait = reset * 1000 - Date.now() + 2000;
+      if (wait > 0) {
+        console.log(`Rate limit low. Waiting ${Math.round(wait / 1000)}s...`);
+        await sleep(wait);
       }
     }
     return res;
   });
 
-  async function checkSearchRateLimit() {
-    const rate = await github.get("/rate_limit");
-    apiCalls++;
-    const search = rate.data.resources.search;
-    if (search.remaining < 5 && search.reset) {
-      const waitMs = search.reset * 1000 - Date.now() + 2000;
-      if (waitMs > 0) {
-        console.log(
-          `Search API rate limit low (${
-            search.remaining
-          } left). Waiting ~${Math.round(waitMs / 1000)}s...`
-        );
-        await sleep(waitMs);
-      }
+  return client;
+}
+
+// ── Get username ─────────────────────────────────────────────────────────────
+async function getUsername(
+  github: AxiosInstance,
+  apiCalls: ReturnType<typeof getApiCallsCounter>
+) {
+  const res = await github.get("/user");
+  apiCalls.increment();
+  return res.data.login;
+}
+
+// ── Load or fetch Topcoder skills (cached forever) ───────────────────────────
+async function loadOrFetchSkills(
+  apiCalls: ReturnType<typeof getApiCallsCounter>
+) {
+  try {
+    const data = await fs.readFile(SKILLS_CACHE_FILE, "utf-8");
+    const skills = JSON.parse(data);
+    console.log(`Loaded ${skills.length} Topcoder skills from cache`);
+    return skills;
+  } catch {
+    console.log("Fetching Topcoder skills...");
+    const skills: Skill[] = [];
+    let page = 1;
+    while (true) {
+      const res = await axios.get(
+        `https://api.topcoder-dev.com/v5/standardized-skills/skills?page=${page}&perPage=100`
+      );
+      apiCalls.increment();
+      skills.push(...res.data.map((s: any) => ({ id: s.id, name: s.name })));
+
+      const next = res.headers["x-next-page"];
+      if (!next) break;
+      page = parseInt(next, 10);
     }
+
+    await fs.writeFile(SKILLS_CACHE_FILE, JSON.stringify(skills, null, 2));
+    console.log(`Cached ${skills.length} skills`);
+    return skills;
+  }
+}
+
+// ── Load or compute GitHub analysis (cached per user) ────────────────────────
+async function loadOrComputeAnalysis(
+  github: AxiosInstance,
+  username: string,
+  apiCalls: ReturnType<typeof getApiCallsCounter>,
+  searchCalls: ReturnType<typeof getApiCallsCounter>
+): Promise<CachedUserAnalysis> {
+  const cacheFile = getUserCacheFile(username);
+
+  // Try cache first
+  try {
+    const raw = await fs.readFile(cacheFile, "utf-8");
+    const cached = JSON.parse(raw) as CachedUserAnalysis;
+    console.log(`Using cached analysis for @${username} (${cached.timestamp})`);
+    return cached;
+  } catch {
+    console.log(`No cache for @${username} — full analysis required`);
   }
 
-  // ── Get authenticated user ──────────────────────────────────────────────────
-  const user = await github.get("/user");
-  const username = user.data.login;
-  console.log(`Analyzing GitHub user: @${username}\n`);
+  // ── Full analysis (only runs once or on cache miss) ───────────────────────
+  const reposSet = await discoverRepos(github, username, apiCalls, searchCalls);
+  const reposToAnalyze = Array.from(reposSet).slice(0, MAX_REPOS_TO_ANALYZE);
 
-  // ── Fetch Topcoder standardized skills ──────────────────────────────────────
-  console.log("Fetching Topcoder skills list...");
-  const allSkills: Skill[] = [];
+  console.log(`Total unique repositories discovered: ${reposSet.size}`);
+  console.log(`Analyzing up to ${MAX_REPOS_TO_ANALYZE} repositories`);
+
+  const { repoAnalyses, totalCommits, totalPRs } = await analyzeRepos(
+    github,
+    username,
+    reposToAnalyze,
+    apiCalls
+  );
+
+  // Aggregate ALL evidence links
+  const allEvidenceLinks: string[] = [];
+  Object.values(repoAnalyses).forEach((a) => {
+    allEvidenceLinks.push(...a.evidence);
+  });
+
+  const aggregated = aggregateAnalysis(repoAnalyses);
+
+  const cacheData: CachedUserAnalysis = {
+    timestamp: new Date().toISOString(),
+    username,
+    reposCount: reposSet.size,
+    analyzedRepos: reposToAnalyze.length,
+    totalCommits,
+    totalPRs,
+    langPercentages: aggregated.langPercentages.split("\n"),
+    topDependencies: aggregated.topDeps,
+    topFileTypes: aggregated.topFileTypes,
+    allEvidenceLinks,
+    reposToAnalyze,
+  };
+
+  await fs.writeFile(cacheFile, JSON.stringify(cacheData, null, 2));
+  console.log(
+    `Saved full analysis cache for @${username} (${allEvidenceLinks.length} evidence links)`
+  );
+
+  return cacheData;
+}
+
+// ── Discover repos ───────────────────────────────────────────────────────────
+async function discoverRepos(
+  github: AxiosInstance,
+  username: string,
+  apiCalls: ReturnType<typeof getApiCallsCounter>,
+  searchCalls: ReturnType<typeof getApiCallsCounter>
+) {
+  const repos = new Set<string>();
+
+  // Owned/member repos
   let page = 1;
   while (true) {
-    const resp = await axios.get(
-      `https://api.topcoder-dev.com/v5/standardized-skills/skills?page=${page}&perPage=100`
-    );
-    apiCalls++;
-    allSkills.push(...resp.data.map((s: any) => ({ id: s.id, name: s.name })));
-
-    const nextPage = resp.headers["x-next-page"];
-    if (!nextPage) break;
-    page = parseInt(nextPage, 10);
-    console.log(
-      `  Fetched page ${page - 1} (${allSkills.length} skills so far)`
-    );
-  }
-  console.log(`Total skills loaded: ${allSkills.length}\n`);
-
-  // ── Collect all contributed repositories ────────────────────────────────────
-  const reposSet = new Set<string>();
-
-  // 1. Repos user owns / is member of (no 1000 limit)
-  console.log("Fetching owned & member repositories...");
-  page = 1;
-  while (true) {
-    const resp = await github.get(
+    const res = await github.get(
       `/user/repos?type=all&per_page=100&page=${page}`
     );
-    const data = resp.data;
+    apiCalls.increment();
+    const data = res.data;
     if (data.length === 0) break;
-    data.forEach((r: any) => reposSet.add(r.full_name));
+    data.forEach((r: any) => repos.add(r.full_name));
     page++;
   }
 
-  // 2. Repos from commits (capped at ~1000 results total)
-  console.log("Fetching additional repos from commit history...");
-  await checkSearchRateLimit();
+  // Commits search
   page = 1;
-  let commitSearchLimited = false;
   while (true) {
     try {
-      if (page * 100 > 1000) {
-        console.warn(
-          "GitHub commit search reached hard limit (~1000 results). Some older contributions may be missed."
-        );
-        commitSearchLimited = true;
-        break;
-      }
-
-      const resp = await github.get(
+      if (page * 100 > 1000) break;
+      const res = await github.get(
         `/search/commits?q=author:${username}&per_page=100&page=${page}`
       );
-      searchCalls++;
-      const data = resp.data;
-
+      searchCalls.increment();
+      const data = res.data;
       if (data.items?.length === 0) break;
-
-      data.items.forEach((item: any) =>
-        reposSet.add(item.repository.full_name)
-      );
+      data.items.forEach((item: any) => repos.add(item.repository.full_name));
       page++;
-
-      await checkSearchRateLimit();
     } catch (err: any) {
-      if (
-        err.response?.status === 422 &&
-        err.response?.data?.message?.includes("Only the first 1000")
-      ) {
-        console.warn(
-          "GitHub commit search hit 1000-result limit. Stopping commit search."
-        );
-        commitSearchLimited = true;
-        break;
-      }
+      if (err.response?.status === 422) break;
       throw err;
     }
   }
 
-  // 3. Repos from pull requests (also capped at ~1000)
-  console.log("Fetching additional repos from pull requests...");
-  await checkSearchRateLimit();
+  // PRs search
   page = 1;
-  let prSearchLimited = false;
   while (true) {
     try {
-      if (page * 100 > 1000) {
-        console.warn(
-          "GitHub PR search reached hard limit (~1000 results). Some older PRs may be missed."
-        );
-        prSearchLimited = true;
-        break;
-      }
-
-      const resp = await github.get(
+      if (page * 100 > 1000) break;
+      const res = await github.get(
         `/search/issues?q=author:${username}+type:pr&per_page=100&page=${page}`
       );
-      searchCalls++;
-      const data = resp.data;
-
+      searchCalls.increment();
+      const data = res.data;
       if (data.items?.length === 0) break;
-
       data.items.forEach((item: any) => {
         const repo = item.repository_url.replace(
           "https://api.github.com/repos/",
           ""
         );
-        reposSet.add(repo);
+        repos.add(repo);
       });
-
       page++;
-
-      await checkSearchRateLimit();
     } catch (err: any) {
-      if (
-        err.response?.status === 422 &&
-        err.response?.data?.message?.includes("Only the first 1000")
-      ) {
-        console.warn(
-          "GitHub PR search hit 1000-result limit. Stopping PR search."
-        );
-        prSearchLimited = true;
-        break;
-      }
+      if (err.response?.status === 422) break;
       throw err;
     }
   }
 
-  const repos = Array.from(reposSet);
-  const reposToAnalyze = repos.slice(0, MAX_REPOS_TO_ANALYZE);
+  return repos;
+}
 
-  console.log(`Total unique repositories discovered: ${repos.length}`);
-  console.log(
-    `Analyzing up to ${MAX_REPOS_TO_ANALYZE} repositories (MAX_REPOS_TO_ANALYZE=${MAX_REPOS_TO_ANALYZE})`
-  );
-  if (commitSearchLimited || prSearchLimited) {
-    console.log(
-      "  Note: Some repos may be missing due to GitHub Search API 1000-result limit"
-    );
-  }
-
-  // Analyze each repository
-  interface RepoAnalysis {
-    languages: Record<string, number>;
-    dependencies: Set<string>;
-    fileTypes: Set<string>;
-    commitCount: number;
-    prCount: number;
-    evidence: string[]; // Links to commits, PRs, etc.
-  }
-
+// ── Analyze repos ────────────────────────────────────────────────────────────
+async function analyzeRepos(
+  github: AxiosInstance,
+  username: string,
+  repos: string[],
+  apiCalls: ReturnType<typeof getApiCallsCounter>
+) {
   const repoAnalyses: Record<string, RepoAnalysis> = {};
   let totalCommits = 0;
   let totalPRs = 0;
 
-  for (const repo of reposToAnalyze) {
-    console.log(`Analyzing repository: ${repo}`);
+  for (const repo of repos) {
+    console.log(`Analyzing: ${repo}`);
     const analysis: RepoAnalysis = {
       languages: {},
       dependencies: new Set(),
@@ -344,84 +416,71 @@ async function main() {
       evidence: [],
     };
 
-    // Get languages
+    // Languages
     try {
-      const langsResponse = await github.get(`/repos/${repo}/languages`);
-      analysis.languages = langsResponse.data;
-    } catch (error) {
-      console.warn(`Failed to get languages for ${repo}`);
-    }
+      const res = await github.get(`/repos/${repo}/languages`);
+      analysis.languages = res.data;
+    } catch {}
 
-    // Get commits by user
-    console.log(`  Fetching commits for ${repo}...`);
+    // Commits
     try {
-      let commitPage = 1;
+      let page = 1;
       while (true) {
-        const commitsResponse = await github.get(
-          `/repos/${repo}/commits?author=${username}&per_page=100&page=${commitPage}`
+        const res = await github.get(
+          `/repos/${repo}/commits?author=${username}&per_page=100&page=${page}`
         );
-        const commitsData = commitsResponse.data;
-        if (commitsData.length === 0) break;
+        apiCalls.increment();
+        const data = res.data;
+        if (data.length === 0) break;
+        analysis.commitCount += data.length;
 
-        analysis.commitCount += commitsData.length;
-
-        for (const commit of commitsData) {
+        for (const commit of data) {
           try {
-            const commitDetail = await github.get(
+            const detail = await github.get(
               `/repos/${repo}/commits/${commit.sha}`
             );
-            for (const file of commitDetail.data.files || []) {
+            apiCalls.increment();
+            for (const file of detail.data.files || []) {
               const ext = path.extname(file.filename).slice(1);
               if (ext) analysis.fileTypes.add(ext);
             }
             analysis.evidence.push(commit.html_url);
-          } catch (detailErr: any) {
-            console.warn(
-              `  Failed commit detail in ${repo}: ${detailErr.message}`
-            );
-          }
+          } catch {}
         }
-        commitPage++;
+        page++;
       }
     } catch (err: any) {
-      if (
-        err.response?.status === 409 &&
-        err.response?.data?.message?.includes("Git Repository is empty")
-      ) {
-        console.log(
-          `  Skipping commits for ${repo} — repository is empty (no commits).`
-        );
-        // We can still try to fetch PRs / languages / deps below if useful
+      if (err.response?.status === 409) {
+        console.log(`  ${repo} is empty — skipping commits`);
       } else {
-        console.warn(`  Error fetching commits from ${repo}: ${err.message}`);
+        console.warn(`Commits fetch error: ${err.message}`);
       }
     }
 
-    // Get PRs by user
-    console.log(`  Fetching PRs for ${repo}...`);
-    let prPage = 1;
-    while (true) {
-      const prsResponse = await github.get(
-        `/repos/${repo}/pulls?creator=${username}&state=all&per_page=100&page=${prPage}`
-      );
-      const prsData = prsResponse.data;
-      if (prsData.length === 0) break;
-      analysis.prCount += prsData.length;
-      prsData.forEach((pr: any) => analysis.evidence.push(pr.html_url));
-      prPage++;
-    }
-
-    // Get dependencies from common files
-    const depFiles = ["package.json", "requirements.txt", "pom.xml"]; // Add more as needed
-    for (const file of depFiles) {
-      try {
-        const contentResponse = await github.get(
-          `/repos/${repo}/contents/${file}`
+    // PRs
+    try {
+      let page = 1;
+      while (true) {
+        const res = await github.get(
+          `/repos/${repo}/pulls?creator=${username}&state=all&per_page=100&page=${page}`
         );
-        const content = Buffer.from(
-          contentResponse.data.content,
-          "base64"
-        ).toString("utf-8");
+        apiCalls.increment();
+        const data = res.data;
+        if (data.length === 0) break;
+        analysis.prCount += data.length;
+        data.forEach((pr: any) => analysis.evidence.push(pr.html_url));
+        page++;
+      }
+    } catch {}
+
+    // Dependencies
+    for (const file of ["package.json", "requirements.txt", "pom.xml"]) {
+      try {
+        const res = await github.get(`/repos/${repo}/contents/${file}`);
+        apiCalls.increment();
+        const content = Buffer.from(res.data.content, "base64").toString(
+          "utf-8"
+        );
         let deps: string[] = [];
         if (file === "package.json") {
           const json = JSON.parse(content);
@@ -435,7 +494,6 @@ async function main() {
             .map((l) => l.trim())
             .filter((l) => l && !l.startsWith("#"));
         } else if (file === "pom.xml") {
-          // Simple parse for dependencies
           const matches =
             content.match(/<artifactId>(.*?)<\/artifactId>/g) || [];
           deps = matches.map((m) =>
@@ -443,9 +501,7 @@ async function main() {
           );
         }
         deps.forEach((d) => analysis.dependencies.add(d));
-      } catch (error) {
-        // File not found, skip
-      }
+      } catch {}
     }
 
     repoAnalyses[repo] = analysis;
@@ -453,223 +509,388 @@ async function main() {
     totalPRs += analysis.prCount;
   }
 
-  // Aggregate data for AI prompt
+  return { repoAnalyses, totalCommits, totalPRs };
+}
+
+// ── Aggregate analysis data ─────────────────────────────────────────────────
+function aggregateAnalysis(repoAnalyses: Record<string, RepoAnalysis>) {
   const allLanguages = new Map<string, number>();
   const allDependencies = new Set<string>();
   const allFileTypes = new Set<string>();
   const allEvidence: string[] = [];
 
-  for (const analysis of Object.values(repoAnalyses)) {
-    for (const [lang, bytes] of Object.entries(analysis.languages)) {
+  Object.values(repoAnalyses).forEach((a) => {
+    Object.entries(a.languages).forEach(([lang, bytes]) => {
       allLanguages.set(lang, (allLanguages.get(lang) || 0) + bytes);
-    }
-    analysis.dependencies.forEach((dep) => allDependencies.add(dep));
-    analysis.fileTypes.forEach((ft) => allFileTypes.add(ft));
-    allEvidence.push(...analysis.evidence);
-  }
+    });
+    a.dependencies.forEach((dep) => allDependencies.add(dep));
+    a.fileTypes.forEach((ft) => allFileTypes.add(ft));
+    allEvidence.push(...a.evidence);
+  });
 
   const totalBytes =
-    Array.from(allLanguages.values()).reduce((sum, b) => sum + b, 0) || 1;
+    Array.from(allLanguages.values()).reduce((s, b) => s + b, 0) || 1;
   const langPercentages = Array.from(allLanguages.entries())
-    .map(
-      ([lang, bytes]) => `${lang}: ${((bytes / totalBytes) * 100).toFixed(2)}%`
-    )
+    .map(([l, b]) => `${l}: ${((b / totalBytes) * 100).toFixed(2)}%`)
     .join("\n");
 
-  const depsList = Array.from(allDependencies).slice(0, 80).join(", ");
-  const fileTypesList = Array.from(allFileTypes).join(", ");
+  const topDeps = Array.from(allDependencies).slice(0, 80);
+  const topFileTypes = Array.from(allFileTypes).slice(0, 20);
 
-  // collect diverse links, max 15–20 total
-  const diverseEvidence: string[] = [];
+  // Diverse evidence
+  const diverse: string[] = [];
+  const prLinks = allEvidence.filter((l) => l.includes("/pull/"));
+  const commitLinks = allEvidence.filter((l) => l.includes("/commit/"));
+  diverse.push(...prLinks.slice(0, 8));
+  diverse.push(...commitLinks.slice(0, 10));
+  if (diverse.length < 15) {
+    const rest = allEvidence.filter((l) => !diverse.includes(l));
+    diverse.push(...rest.slice(0, 15 - diverse.length));
+  }
+  diverse.sort(() => Math.random() - 0.5);
+  const evidenceSample = diverse.slice(0, 20);
 
-  // Prefer PRs first
-  const allPRLinks = allEvidence.filter((link) => link.includes("/pull/"));
-  const allCommitLinks = allEvidence.filter((link) =>
-    link.includes("/commit/")
-  );
+  return {
+    langPercentages,
+    topDeps,
+    topFileTypes,
+    evidenceSample,
+  };
+}
 
-  // Take up to 8 PRs + up to 10 commits, from different repos if possible
-  diverseEvidence.push(...allPRLinks.slice(0, 8));
-  diverseEvidence.push(...allCommitLinks.slice(0, 10));
+// ── Random Diverse Evidence Links ─────────────────────────────────────────────────
+function getFreshEvidenceSample(
+  allLinks: string[],
+  maxLinks: number = 12
+): string {
+  if (allLinks.length <= maxLinks) {
+    return allLinks.join("\n");
+  }
 
-  // If still short, add any remaining
-  if (diverseEvidence.length < 15) {
-    const remaining = allEvidence.filter(
-      (link) => !diverseEvidence.includes(link)
+  // Group by repo
+  const byRepo = new Map<string, string[]>();
+
+  allLinks.forEach((link) => {
+    const repoMatch = link.match(
+      /github\.com\/([^/]+\/[^/]+)(?:\/commit|\/pull)/
     );
-    diverseEvidence.push(...remaining.slice(0, 15 - diverseEvidence.length));
+    const repo = repoMatch ? repoMatch[1] : "unknown";
+    if (!byRepo.has(repo)) byRepo.set(repo, []);
+    byRepo.get(repo)!.push(link);
+  });
+
+  const selected: string[] = [];
+
+  // Priority 1: PRs (richer context)
+  for (const links of byRepo.values()) {
+    const prLink = links.find((l) => l.includes("/pull/"));
+    if (prLink && selected.length < maxLinks) selected.push(prLink);
   }
 
-  // Shuffle lightly to avoid bias toward one repo
-  diverseEvidence.sort(() => Math.random() - 0.5);
+  // Priority 2: Commits
+  for (const links of byRepo.values()) {
+    const commitLink = links.find(
+      (l) => l.includes("/commit/") && !selected.includes(l)
+    );
+    if (commitLink && selected.length < maxLinks) selected.push(commitLink);
+  }
 
-  const evidenceSample = diverseEvidence.slice(0, 20).join("\n");
+  // Fill remaining randomly from leftover
+  const remaining = allLinks.filter((l) => !selected.includes(l));
+  while (selected.length < maxLinks && remaining.length > 0) {
+    const idx = Math.floor(Math.random() * remaining.length);
+    selected.push(remaining.splice(idx, 1)[0]);
+  }
 
-  // Prepare prompt for LLM
-  const skillNames = allSkills.slice(0, 50).map(s => s.name).join(", ");
-  const prompt = `
-Given GitHub activity summary:
+  // Shuffle final selection
+  for (let i = selected.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [selected[i], selected[j]] = [selected[j], selected[i]];
+  }
 
-Languages & %:
-${langPercentages}
+  return selected.slice(0, maxLinks).join("\n");
+}
 
-Key dependencies:
-${depsList}
+// ── Build prompt ─────────────────────────────────────────────────────────────
+function buildPrompt(
+  analysis: CachedUserAnalysis & { evidenceSample: string },
+  allSkills: Skill[]
+) {
+  const langPercentages = analysis.langPercentages.join("\n");
+  const depsList = analysis.topDependencies.slice(0, 40).join(", ");
+  const fileTypesList = analysis.topFileTypes.join(", ");
+  const skillNames = allSkills
+    .slice(0, 60) // reduce list size dramatically
+    .map((s) => s.name)
+    .join(", ");
 
-File types:
-${fileTypesList}
+  return `
+  GitHub summary:
+  Languages: ${langPercentages}
+  Key deps: ${depsList}
+  File types: ${fileTypesList}
+  Commits: ${analysis.totalCommits} | PRs: ${analysis.totalPRs}
+  Fresh sample links (use 1–2 in reasons when relevant): ${analysis.evidenceSample}
+  
+  Recommend **exactly 5–10** skills **ONLY** from this list — use as many strong matches as possible:
+  ${skillNames}
+  
+  Rules (must obey):
+    - name: EXACT match (case-sensitive) from the list — NO other names.
+    - score: 0–100 based on how strongly evidence matches.
+    - reason: 1–2 sentences with **specific evidence**:
+        - ALWAYS include 1–2 deps/file types (e.g. tailwindcss, .tsx/.ts files)
+        - ALWAYS include 1 relevant link from sample links when it supports the reason
+        - Explain why this leads to the score (e.g. "multiple packages + high usage → 92")
+  
+  Output ONLY JSON array — nothing else.`;
+}
 
-Commits: ${totalCommits} | PRs: ${totalPRs}
+// ── Call LLM ─────────────────────────────────────────────────────────────────
+async function callLLM(prompt: string): Promise<string> {
+  const provider = LLM_PROVIDER;
+  // ── Unified OpenAI-compatible providers ──────────────────────────────────
+  if (provider === "huggingface_router" || provider === "ollama") {
+    let baseURL: string;
+    let apiKey: string;
+    let model: string;
 
-Sample repos & links:
-${reposToAnalyze.slice(0, 20).map(r => `https://github.com/${r}`).join("\n")}
-${evidenceSample}
+    if (provider === "huggingface_router") {
+      baseURL = "https://router.huggingface.co/v1";
+      apiKey = HUGGINGFACE_TOKEN!;
+      model = process.env.HF_MODEL || "openai/gpt-oss-120b:groq";
+      console.log(`Querying Hugging Face router: ${model}`);
+    } else {
+      // ollama (local)
+      baseURL = "http://localhost:11434/v1/";
+      apiKey = "ollama"; // dummy — ignored locally
+      model = process.env.OLLAMA_MODEL || "gpt-oss:120b";
+      console.log(`Querying local Ollama: ${model} @ ${baseURL}`);
+    }
 
-Recommend 8–12 most relevant skills from this exact list: ${skillNames}
+    const client = new OpenAI({apiKey, baseURL});
 
-For each recommended skill, provide:
-- name: **exact** skill name from the list (case-sensitive match required)
-- score: confidence score (0-100)
-- reason: concise explanation why this skill matches, referencing languages, dependencies, file types, commits/PRs or links when relevant
-
-Only include links if they directly support the reason — do not list them randomly.
-You MUST respond with **ONLY** a valid JSON array — nothing before it, nothing after it, no explanations, no markdown, no code blocks, no introductory text, no trailing commas.
-
-Example (do NOT copy):
-[{"name":"Angular Components","score":92,"reason":"Many @angular/* packages and .ts files"},{"name":"UI/UX Research","score":78,"reason":"Tailwind + Radix UI usage across repos"}]
-
-Your response begins and ends with the JSON array
-`;
-
-  console.log("Querying LLM for skill recommendations...");
-
-  let llmResponse: string;
-  if (LLM_PROVIDER === "huggingface_router") {
-    const HF_MODEL = process.env.HF_MODEL || "openai/gpt-oss-120b:novita";
-
-    const openaiCompatible = new OpenAI({
-      apiKey: HUGGINGFACE_TOKEN,
-      baseURL: "https://router.huggingface.co/v1",
-    });
-
-    console.log(`Querying Hugging Face router with model: ${HF_MODEL} ...`);
-
-    console.log(`Prompt payload: ${prompt}`);
-    console.log(`Prompt length: ${prompt.length} chars (~${Math.round(prompt.length / 4)} tokens)`);
-
-    const completion = await openaiCompatible.chat.completions.create({
-      model: HF_MODEL,
+    const completion = await client.chat.completions.create({
+      model,
       messages: [{ role: "user", content: prompt }],
-      temperature: 0.3,
-      max_tokens: 2000, // adjust based on needs (gpt-oss-120b supports long context)
+      temperature: 0.1,
+      max_tokens: 1600,
       stream: false,
     });
 
-    llmResponse = completion.choices[0].message.content || "";
-  } else if (LLM_PROVIDER === "ollama") {
-    const ollamaResponse = await axios.post(`${OLLAMA_URL}/api/chat`, {
-      model: "llama2", // or your preferred model
+    return completion.choices[0]?.message?.content || "";
+  }
+
+  // ── Ollama Cloud ───────────────────────────────────────────────
+  else if (provider === "ollama_cloud") {
+    const apiKey = OLLAMA_API_KEY;
+    const model = process.env.OLLAMA_MODEL || "gpt-oss:120b";
+
+    console.log(`Querying Ollama Cloud: ${model}`);
+
+    const ollama = new Ollama({
+      host: "https://api.ollama.com",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+
+    const response = await ollama.chat({
+      model,
       messages: [{ role: "user", content: prompt }],
       stream: false,
     });
-    llmResponse = ollamaResponse.data.message.content || "";
-  } else {
-    throw new Error(`Unsupported LLM provider: ${LLM_PROVIDER}`);
+
+    return response.message.content || "";
   }
 
-  // Parse LLM response with robust cleaning
-  let aiRecs: { name: string; score: number; reason: string }[] = [];
-  let cleaned = llmResponse.trim();
+  throw new Error(`Unsupported LLM provider: ${provider}`);
+}
 
-  console.log("\n=== RAW LLM RESPONSE ===");
-  console.log(llmResponse);
-  console.log("=========================\n");
+// ── Parse & map recommendations ──────────────────────────────────────────────
+function parseAndMapRecommendations(
+  raw: string,
+  allSkills: Skill[]
+): Recommendation[] {
+  let cleaned = raw.trim();
 
-  // Remove markdown fences
+  // Step 1: Remove common markdown/code fences
   cleaned = cleaned.replace(/^```json?\s*/i, "").replace(/\s*```$/i, "");
 
-  // Remove any non-JSON prefix/suffix
-  const arrayStart = cleaned.indexOf("[");
-  const arrayEnd = cleaned.lastIndexOf("]");
-  if (arrayStart !== -1 && arrayEnd !== -1 && arrayEnd > arrayStart) {
-    cleaned = cleaned.substring(arrayStart, arrayEnd + 1);
+  // Step 2: Extract the array part only (between first [ and last ])
+  const firstBracket = cleaned.indexOf("[");
+  const lastBracket = cleaned.lastIndexOf("]");
+  if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+    cleaned = cleaned.substring(firstBracket, lastBracket + 1);
   }
 
-  // Fix trailing comma before ]
-  cleaned = cleaned.replace(/,\s*]$/, "]");
+  // Step 3: Remove trailing commas before closing ]
+  cleaned = cleaned.replace(/,\s*]/g, "]");
 
-  // Try to close incomplete last object
+  // Step 4: If array is unclosed, find the last complete object and force-close
   if (!cleaned.endsWith("]")) {
-    const lastObjStart = cleaned.lastIndexOf("{");
-    if (lastObjStart !== -1) {
-      // Cut off after last complete object if possible
-      const prevClose = cleaned.lastIndexOf("}", lastObjStart);
-      if (prevClose !== -1) {
-        cleaned = cleaned.substring(0, prevClose + 1) + "}]";
-      } else {
-        cleaned += '"}]';
-      }
+    // Find last complete object (last '}' before potential garbage)
+    const lastCloseBrace = cleaned.lastIndexOf("}");
+    if (lastCloseBrace !== -1) {
+      // Cut after last complete object and close array
+      cleaned = cleaned.substring(0, lastCloseBrace + 1) + "]";
+    } else {
+      // Desperate recovery: just close it
+      cleaned += "]";
     }
   }
+
+  // Step 5: Remove any trailing garbage after final ]
+  const finalClose = cleaned.lastIndexOf("]");
+  if (finalClose !== -1) {
+    cleaned = cleaned.substring(0, finalClose + 1);
+  }
+
+  // Debug: show what we ended up with
+  console.log("\n=== FINAL CLEANED JSON FOR PARSING ===");
+  console.log(cleaned);
+  console.log("=======================================\n");
 
   try {
     const parsed = JSON.parse(cleaned);
-    if (Array.isArray(parsed)) {
-      aiRecs = parsed.filter(
-        (item) => item?.name && typeof item.score === "number" && item?.reason
-      );
-      console.log(
-        `Parsed ${aiRecs.length} valid recommendations after aggressive cleaning`
-      );
-    }
-  } catch (err: any) {
-    console.error("Parsing still failed:", err.message);
-    console.error("Final cleaned string:", cleaned);
-    aiRecs = [];
-  }
 
-  // Map to recommendations with IDs
-  const recommendations: Recommendation[] = [];
-  for (const rec of aiRecs) {
-    const skill = allSkills.find(
-      (s) => s.name.toLowerCase() === rec.name.toLowerCase()
+    if (!Array.isArray(parsed)) {
+      throw new Error("Parsed result is not an array");
+    }
+
+    const validRecs = parsed
+      .filter(
+        (item: any) =>
+          item &&
+          (typeof item.name === "string" || typeof item.skill === "string") &&
+          typeof item.score === "number" &&
+          typeof item.reason === "string"
+      )
+      .map((item: any) => {
+        const cleanName = (item.name ?? item.skill)?.trim();
+        const skill = allSkills.find(
+          (s) => s.name.trim().toLowerCase() === cleanName?.toLowerCase()
+        );
+
+        if (!skill && cleanName) {
+          console.warn(
+            `Rejected hallucinated skill: "${cleanName}" (not in Topcoder list)`
+          );
+        }
+
+        return skill
+          ? {
+              id: skill.id,
+              name: skill.name,
+              score: Math.max(0, Math.min(100, Math.round(item.score))),
+              info: item.reason?.trim() || "No reason provided",
+            }
+          : null;
+      })
+      .filter((r): r is Recommendation => r !== null && r.score >= 40);
+
+    console.log(
+      `Parsed ${validRecs.length} valid / ${parsed.length} total recommendations (filtered non-matches)`
     );
-    if (skill) {
-      recommendations.push({
-        id: skill.id,
-        name: skill.name,
-        score: rec.score,
-        info: rec.reason,
-      });
-    }
+
+    return validRecs;
+  } catch (err: any) {
+    console.error(
+      "JSON parsing failed even after aggressive cleaning:",
+      err.message
+    );
+    console.error("Final cleaned string:", cleaned);
+    return [];
   }
+}
 
-  // Sort by score descending
-  recommendations.sort((a, b) => b.score - a.score);
-
-  // Output recommendations
+// ── Display results ──────────────────────────────────────────────────────────
+function displayResults(
+  recommendations: Recommendation[],
+  analysis: CachedUserAnalysis,
+  totalApiCalls: number,
+  startTime: number
+) {
   console.log("\nRecommended Verified Skills:");
-  for (const rec of recommendations) {
-    console.log(`Skill ID: ${rec.id}`);
-    console.log(`Skill Name: ${rec.name}`);
-    console.log(`Confidence Score: ${rec.score}`);
-    console.log(`Why: ${rec.info}`);
+  recommendations.sort((a, b) => b.score - a.score);
+  for (const r of recommendations) {
+    console.log(`Skill ID: ${r.id}`);
+    console.log(`Skill Name: ${r.name}`);
+    console.log(`Score: ${r.score}`);
+    console.log(`Why: ${r.info}`);
     console.log("---");
   }
 
-  // Run summary
   console.log("\nRun Summary:");
-  console.log(`Repos scanned: ${Object.keys(repoAnalyses).length}`);
-  console.log(
-    `Contributions inspected: ${totalCommits} commits, ${totalPRs} PRs`
-  );
-  console.log(`Total API calls: ${apiCalls + searchCalls}`);
-  console.log(
-    `Elapsed time: ${((Date.now() - startTime) / 1000).toFixed(2)} seconds`
+  console.log(`Repos discovered: ${analysis.reposCount}`);
+  console.log(`Repos analyzed: ${analysis.analyzedRepos}`);
+  console.log(`Commits: ${analysis.totalCommits} | PRs: ${analysis.totalPRs}`);
+  console.log(`Total API calls: ${totalApiCalls}`);
+  const elapsed = (Date.now() - startTime) / 1000;
+  console.log(`Elapsed: ${elapsed.toFixed(2)} seconds`);
+
+  exportResultsToFile(
+    analysis.username,
+    recommendations,
+    analysis,
+    totalApiCalls,
+    elapsed
   );
 }
 
-main().catch((error) => {
-  console.error("Error:", error);
+// ── Export the results ──────────────────────────────────────────────────────────
+async function exportResultsToFile(
+  username: string,
+  recommendations: Recommendation[],
+  analysis: CachedUserAnalysis,
+  totalApiCalls: number,
+  elapsedSeconds: number
+) {
+  const dateStr = new Date().toISOString().split("T")[0];
+  const outputFile = `skills-report-${username.toLowerCase()}-${dateStr}.txt`;
+
+  const content = `
+  GitHub Skills Recommendation Report
+  Generated: ${new Date().toISOString()}
+  User: @${username}
+  
+  Repos discovered: ${analysis.reposCount}
+  Repos analyzed: ${analysis.analyzedRepos}
+  Commits: ${analysis.totalCommits} | PRs: ${analysis.totalPRs}
+  Total API calls: ${totalApiCalls}
+  Elapsed time: ${elapsedSeconds.toFixed(2)} seconds
+  
+  Recommended Verified Skills:
+  ${recommendations
+    .sort((a, b) => b.score - a.score)
+    .map(
+      (r) =>
+        `Skill ID: ${r.id}
+  Skill Name: ${r.name}
+  Score: ${r.score}
+  Why: ${r.info}
+  ---`
+    )
+    .join("\n\n")}
+  
+  Run Summary:
+  Repos discovered: ${analysis.reposCount}
+  Repos analyzed: ${analysis.analyzedRepos}
+  Commits: ${analysis.totalCommits} | PRs: ${analysis.totalPRs}
+  Total API calls: ${totalApiCalls}
+  Elapsed: ${elapsedSeconds.toFixed(2)} seconds
+  `;
+
+  try {
+    await fs.writeFile(outputFile, content.trim());
+    console.log(`\nResults exported to: ${outputFile}`);
+  } catch (err) {
+    console.error(`Failed to export results to file: ${err}`);
+  }
+}
+
+// ── Run ──────────────────────────────────────────────────────────────────────
+main().catch((err) => {
+  console.error("Fatal error:", err);
   process.exit(1);
 });

@@ -1,0 +1,53 @@
+GitHub Skills Recommendation Report
+  Generated: 2026-02-01T17:08:32.388Z
+  User: @mirzailhami
+  
+  Repos discovered: 24
+  Repos analyzed: 24
+  Commits: 875 | PRs: 2972
+  Total API calls: 2
+  Elapsed time: 13.48 seconds
+  
+  Recommended Verified Skills:
+  Skill ID: 01ce9e68-0fb5-4904-81f5-68ef48648f73
+  Skill Name: Middleware
+  Score: 92
+  Why: Backend code uses FastAPI, uvicorn and gunicorn – classic Python middleware stack for HTTP services. The backend commit https://github.com/mirzailhami/ai-video-backend/commit/bf503d1f0c4ddfdba0f847ee8830cf05d33c58b8 demonstrates this setup.
+  ---
+
+Skill ID: 00038ad8-9bd1-47b4-8477-256e214a9f82
+  Skill Name: UI/UX Research
+  Score: 88
+  Why: The repo contains many .tsx/.ts files, Tailwind CSS (@tailwindcss/vite) and Radix UI components, showing extensive UI work. See the front‑end commit https://github.com/mirzailhami/ai-video-frontend/commit/c9d1f61c3797ce2b1af51636788d7588bd9ebb61 which adds styled React components.
+  ---
+
+Skill ID: 018202b0-3f2a-421d-a773-0b03ab37e373
+  Skill Name: Hybrid Cloud Computing
+  Score: 85
+  Why: The project integrates AWS services via boto3, awscli and awsebcli while the front‑end is built with Vite and deployed separately, indicating a hybrid cloud architecture. Evidence: https://github.com/mirzailhami/ai-enterprise-guardrails-for-gitHub-copilot/commit/915c250fd50c8b5fb5c091769969634cd602d02a.
+  ---
+
+Skill ID: 01638ce3-c9d2-48df-9f1a-90d4dd3d68fb
+  Skill Name: Component Analysis
+  Score: 80
+  Why: Large collection of reusable React components (.tsx files) and component libraries (Radix UI, lucide‑react) enable systematic component analysis. Example: https://github.com/topcoder-platform/react-components/pull/362.
+  ---
+
+Skill ID: 01ca5359-b92f-4aa8-bfa4-5e19709c549b
+  Skill Name: Information Architecture
+  Score: 78
+  Why: Folder structures, Jinja templates, and many .yaml configuration files show deliberate organization of information flow. See the config‑focused commit https://github.com/mirzailhami/ai-code-reviewer/commit/d09e89a0ef572102928c75e9c72cccd26acd293e.
+  ---
+
+Skill ID: 00f21500-dfc5-46ee-ae6f-c342a7032fe4
+  Skill Name: Repository Pattern
+  Score: 65
+  Why: Backend modules separate data access (using Pydantic models and separate service files) from API routes, a lightweight repository pattern. The work‑manager PR https://github.com/topcoder-platform/work-manager/pull/1717 shows this layering.
+  ---
+  
+  Run Summary:
+  Repos discovered: 24
+  Repos analyzed: 24
+  Commits: 875 | PRs: 2972
+  Total API calls: 2
+  Elapsed: 13.48 seconds

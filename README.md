@@ -1,19 +1,21 @@
 # GitHub to Topcoder Skills Recommender CLI App
 
 ## Overview
-This is a proof-of-concept command-line application written in TypeScript that authenticates a user with GitHub using the device authorization flow, scrapes their GitHub activity (including private repositories), analyzes their contributions, and recommends verified skills from the Topcoder standardized skills API. The recommendations are generated using an AI model (OpenAI or Ollama) for accurate matching, with confidence scores and detailed evidence.
+This is a proof-of-concept command-line application written in TypeScript that authenticates a user with GitHub using the device authorization flow, analyzes their GitHub activity (including private repositories), and recommends verified skills from the Topcoder standardized skills API. Recommendations are generated using an AI model via Hugging Face router or Ollama (local or cloud), with confidence scores and detailed, evidence-based reasoning.
 
-The app performs a deep dive into the user's GitHub actions by:
-- Identifying all repositories the user has contributed to (via ownership, membership, commits, and pull requests).
-- Analyzing languages, dependencies, file types, commits, and pull requests in each repository.
-- Aggregating data and using AI to map to Topcoder skills.
-- Handling GitHub rate limits gracefully for both core and search APIs.
-- Providing progress output during execution.
+The app performs a deep analysis by:
+- Discovering all contributed repositories (owned, member, commits, PRs)
+- Aggregating languages, dependencies, file types, and **all** evidence links
+- Caching results for fast subsequent runs
+- Generating a **fresh, diverse evidence sample** for each LLM query → different results possible
+- Exporting full report to text file
 
 ## Technology Stack
 - TypeScript (Node.js)
 - Axios for HTTP requests
-- Hugging Face OpenAI for AI integration (or Axios for Ollama)
+- OpenAI SDK (for Hugging Face router + local Ollama)
+- ollama library (for Ollama Cloud)
+- fs/promises for caching & export
 - Dotenv for configuration
 
 ## Installation
@@ -25,17 +27,36 @@ cd topcoder-skills-github-skills-import
 ```
 2. Install dependencies:
 ```
-npm install typescript axios dotenv openai @types/node ts-node
+npm install typescript axios dotenv openai @types/node ts-node ollama
 ```
-3. Create a `.env` file in the root directory with the following:
+3. Create a `.env` file in the root directory (copy from `.env.example`) with the following:
 ```
-MAX_REPOS_TO_ANALYZE=max_number_of_repos_to_analyze
+# Analysis limits
+MAX_REPOS_TO_ANALYZE=30
+EVIDENCE_SAMPLE_SIZE=10           # links shown in prompt (fresh sample each run)
+
+# GitHub OAuth App Client ID (required)
 GITHUB_CLIENT_ID=your_github_oauth_client_id
-GITHUB_ACCESS_TOKEN=reuse_token_after_first_run (skip browser auth)
-LLM_PROVIDER=huggingface_router  # or 'ollama'
-HUGGINGFACE_TOKEN=your_huggingface_token  # Required if using hf
-HF_MODEL=your_huggingface_token # eq: openai/gpt-oss-120b:cheapest
-OLLAMA_URL=http://localhost:11434  # Optional, default for ollama
+
+# Reuse token after first run (skip browser auth)
+GITHUB_ACCESS_TOKEN=ghu_...
+
+# LLM provider: huggingface_router | ollama | ollama_cloud
+LLM_PROVIDER=huggingface_router
+
+# Hugging Face router (recommended for quality + evidence links)
+HUGGINGFACE_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+HF_MODEL=openai/gpt-oss-120b:groq
+
+# Local Ollama (when available)
+# LLM_PROVIDER=ollama
+# OLLAMA_URL=http://localhost:11434/v1/   # optional
+# OLLAMA_MODEL=gpt-oss:120b
+
+# Ollama Cloud (fallback for cloud inference)
+# LLM_PROVIDER=ollama_cloud
+# OLLAMA_API_KEY=ollama_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# OLLAMA_MODEL=gpt-oss:120b
 ```
 
 - To obtain `GITHUB_CLIENT_ID`:
@@ -46,36 +67,43 @@ OLLAMA_URL=http://localhost:11434  # Optional, default for ollama
   - Register the app and copy the Client ID.
 
 4. If using Ollama:
-- Install and run Ollama locally[](https://ollama.com)
-- Pull a model, e.g., `ollama pull llama3` or `ollama pull codellama`
+- Local Ollama: Install from [](https://ollama.com) → `ollama pull gpt-oss:120b`
+- Ollama Cloud: Sign up at [](https://ollama.com/cloud) → generate API key
 
 ## Running the App
 
-Run the app:
+Basic run (uses cache after first execution):
 ```
 npm run dev
 ```
 
-- The app will prompt you to authenticate with GitHub (device flow).
-- It will then analyze your profile and output recommendations + run summary.
+Force full re-analysis (ignore cache):
+- Delete .cache/github-yourusername.json
 
-## Approach and Why It Meets Requirements
+## Features & How It Meets Requirements
 
-### Authentication / GitHub API
-- Uses GitHub's device authorization flow (ideal for CLI tools)
-- Requests scopes: `user repo` → allows access to private repos & activity
-- Only analyzes the authenticated user ('me')
+### Authentication & GitHub API
+- Device flow (CLI-friendly)
+- Scope: `user repo` → private repos & activity
 - Handles rate limits:
   - Core API: checks `x-ratelimit-remaining` per response
   - Search API: checks `/rate_limit` endpoint before searches
 - Automatically waits and resumes when limits are hit
+- Caches token in `.env` for future runs
 
-### Standardized Skills API
+### Topcoder Skills API
 - Fetches all skills from: [https://api.topcoder-dev.com/v5/standardized-skills/skills](https://api.topcoder-dev.com/v5/standardized-skills/skills)
-- Uses pagination to get complete list
-- All recommendations use exact skill `id` and `name` from this API
+- Fetched once and cached forever (`topcoder-skills.json`)
+- All recommendations use exact `id` & `name` from API
 
-### Skills Verification & Analysis Depth
+### Analysis Depth
+- Discovers repos via owned/member + commits/PRs search
+- Per-repo: languages, user commits/PRs, common deps files
+- Aggregates: language %, top deps, file types, all evidence links
+- Caches full analysis per user (`github-username.json`)
+
+### LLM & Recommendations
+- Providers: Hugging Face router, local Ollama, Ollama Cloud — switch via `.env`
 - Collects **all** repositories user contributed to (not just owned):
   - `/user/repos` (owned + member/org)
   - `/search/commits` author:username
@@ -93,41 +121,30 @@ npm run dev
 - Uses LLM (Hugging Face OpenAI or Ollama) to match activity → Topcoder skills
   - Sends aggregated stats + sample evidence links
   - Asks for up to 20 recommendations with score + detailed reasoning
+- Prompt forces exact skill names + evidence-based reasons
+- Fresh diverse evidence sample (10–12 links) generated every run → different results possible
+- Parsing + cleaning handles model quirks (truncation, trailing commas, wrong keys)
+- Output: Skill ID, name, score, detailed why (deps, files, links, confidence reason)
 
-### Output
-- Real-time progress logging (repos being scanned, pages fetched, etc.)
-- Final recommendations:
-  - Skill ID
-  - Skill Name
-  - Confidence Score (0–100)
-  - Detailed explanation + evidence references
-- Run summary:
-  - Repos scanned
-  - Commits & PRs inspected
-  - Total API calls
-  - Elapsed time
+### Output & Export
+- Console: recommendations + run summary
+- File export: `skills-report-username-YYYY-MM-DD.txt`
+- Includes full report: header, recommendations, summary
 
-### AI Usage
-- Provider-agnostic: switch between Hugging Face OpenAI and Ollama via .env
-- Prompt is structured to force exact skill name matching
-- Reasons include references to languages, dependencies, file types, and links
+## LLM & Model Notes / Limitations
+- Hugging Face router (OpenAI-compatible): best for quality + link inclusion
+  - Recommended: `openai/gpt-oss-120b:groq`
+- Local Ollama: fast & free when hardware allows
+- Ollama Cloud: reliable cloud fallback
+  - Recommended: `gpt-oss:120b` or `llama3.1:8b`
+- Large models may truncate or hallucinate → aggressive parsing recovers most results
+- If empty/inaccurate: reduce `MAX_REPOS_TO_ANALYZE=5–10` or `EVIDENCE_SAMPLE_SIZE=8`
+- Evidence links: fresh random/diverse sample each run (size via `.env`)
 
-### Why This Submission Should Score Well
-- **Correctness** — uses official Topcoder skills IDs/names
-- **Evidence quality** — includes commit/PR links + AI-generated reasoning
-- **Breadth & depth** — goes far beyond superficial repo language scan
-- **Documentation** — detailed README + inline comments
-- Should pass basic SAST/vulnerability scans (no secrets hardcoded, standard deps)
-
-### LLM & Model Notes / Limitations
-- The app uses Hugging Face's Inference Router (OpenAI-compatible endpoint) for skill recommendations.
-- Model is configurable via `HF_MODEL` in `.env` (default: `openai/gpt-oss-120b:groq` or similar).
-- **Large models** (e.g. 120B-class like gpt-oss-120b) sometimes truncate output or fail to produce clean JSON on long prompts → the app includes aggressive parsing/cleaning to recover most recommendations.
-- **Recommendation**: For best reliability, use smaller, instruction-tuned models such as:
-  - `meta-llama/Llama-3.2-3B-Instruct`
-  - `mistralai/Mistral-Nemo-Instruct-2407:novita`
-- If recommendations are empty or incomplete, try:
-  - Reducing `MAX_REPOS_TO_ANALYZE=5` (or 3–8) in `.env`
-  - Switching to a smaller model above
-  - Running with Ollama locally (set `LLM_PROVIDER=ollama` + pull `llama3.1:8b`)
-- This is a known quirk of routed open-source inference — parsing fallback ensures partial results even on imperfect outputs.
+## Troubleshooting
+- No recommendations → try different model or smaller `MAX_REPOS_TO_ANALYZE`
+- Parsing failed → check console for "Rejected hallucinated skill" or cleaned JSON
+- Rate limit hit → wait or reduce repos
+- Want fresh results → delete `.cache/github-yourusername.json`
+- Ollama Cloud error → verify `OLLAMA_API_KEY`
+- Local Ollama not working → ensure `ollama serve` is running
