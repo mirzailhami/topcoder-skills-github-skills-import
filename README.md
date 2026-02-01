@@ -39,13 +39,13 @@ EVIDENCE_SAMPLE_SIZE=10           # links shown in prompt (fresh sample each run
 GITHUB_CLIENT_ID=your_github_oauth_client_id
 
 # Reuse token after first run (skip browser auth)
-GITHUB_ACCESS_TOKEN=ghu_...
+GITHUB_ACCESS_TOKEN=your_github_access_token
 
 # LLM provider: huggingface_router | ollama | ollama_cloud
 LLM_PROVIDER=huggingface_router
 
 # Hugging Face router (recommended for quality + evidence links)
-HUGGINGFACE_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+HUGGINGFACE_TOKEN=your_huggingface_token
 HF_MODEL=openai/gpt-oss-120b:groq
 
 # Local Ollama (when available)
@@ -55,7 +55,7 @@ HF_MODEL=openai/gpt-oss-120b:groq
 
 # Ollama Cloud (fallback for cloud inference)
 # LLM_PROVIDER=ollama_cloud
-# OLLAMA_API_KEY=ollama_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# OLLAMA_API_KEY=your_ollama_api_key
 # OLLAMA_MODEL=gpt-oss:120b
 ```
 
@@ -148,3 +148,6 @@ Force full re-analysis (ignore cache):
 - Want fresh results → delete `.cache/github-yourusername.json`
 - Ollama Cloud error → verify `OLLAMA_API_KEY`
 - Local Ollama not working → ensure `ollama serve` is running
+
+### Shadow AI / GenAI Detection
+The app intentionally uses AI (Hugging Face / Ollama) for skill recommendations — this is the core feature. All AI calls are external (no local model training or data leakage). Semgrep INFO flags are expected and harmless.

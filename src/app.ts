@@ -1,5 +1,6 @@
 import axios, { AxiosInstance, AxiosResponse } from "axios";
 import * as dotenv from "dotenv";
+import crypto from "crypto";
 import OpenAI from "openai";
 import { Ollama } from "ollama";
 import * as path from "path";
@@ -12,11 +13,10 @@ dotenv.config();
 // ── Configuration & Constants ───────────────────────────────────────────────
 const CACHE_DIR = path.join(process.cwd(), ".cache");
 const SKILLS_CACHE_FILE = path.join(CACHE_DIR, "topcoder-skills.json");
-const getUserCacheFile = (username: string | undefined) =>
-  path.join(
-    CACHE_DIR,
-    username ? `github-${username.toLowerCase()}.json` : "github-unknown.json"
-  );
+const getUserCacheFile = (username: string | undefined) => {
+    const safe = (username || "unknown").replace(/[^a-zA-Z0-9_-]/g, "");
+    return path.join(CACHE_DIR, `github-${safe.toLowerCase()}.json`);
+  };
 
 const MAX_REPOS_TO_ANALYZE = (() => {
   const val = process.env.MAX_REPOS_TO_ANALYZE;
@@ -604,7 +604,7 @@ function getFreshEvidenceSample(
 
   // Shuffle final selection
   for (let i = selected.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = crypto.randomInt(i + 1);
     [selected[i], selected[j]] = [selected[j], selected[i]];
   }
 
