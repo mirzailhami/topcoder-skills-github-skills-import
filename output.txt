@@ -1,0 +1,63 @@
+=== RAW LLM RESPONSE ===
+[{"name":"UI/UX Research","score":95,"reason":"Extensive use of React, TailwindCSS, Radix UI components and many .tsx/.ts files across frontend repos (e.g., ai-video-frontend) shows strong UI/UX focus"},{"name":"StorybookJS","score":80,"reason":"React/TypeScript UI components are typical candidates for Storybook; the presence of UI libraries and component demos suggests Storybook usage even if not listed explicitly"},{"name":"Repository Pattern","score":85,"reason":"Backend services built with FastAPI, Pydantic and SQL files imply a structured data access layer commonly implemented via the Repository Pattern"},{"name":"Process Driven Development","score":88,"reason":"Multiple PRs, Dockerfiles, Vite build scripts and AWS deployment (boto3, awsebcli) indicate a disciplined, process‑oriented development workflow"},{"name":"Hybrid Cloud Computing","score":78,"reason":"Heavy reliance on AWS SDKs (boto3, awscli) together with containerization suggests deployment across cloud environments, fitting hybrid cloud concepts"},{"name":"Page Layout","score":90,"reason":"HTML, CSS, SCSS, Tailwind and UI component libraries are used to craft page layouts; .html and .css file types are prominent"},{"name":"Software Testing Life Cycle","score":70,"reason":"Regular PRs and commits imply testing activities; FastAPI projects typically include pytest or similar test suites even if not listed in dependencies"},{"name":"Component Analysis","score":75,"reason":"Use of Radix UI, React components and TypeScript indicates analysis and composition of reusable UI components"},{"name":"Query Planning","score":68,"reason":"Presence of .sql files and database‑related code suggests attention to query design and planning"},{"name":"Data Storytelling","score":82,"reason":"Dependency on python-pptx and .pptx files shows generation of presentation‑style reports, aligning with data storytelling skills"}]
+=========================
+
+Parsed 10 valid recommendations after aggressive cleaning
+
+Recommended Verified Skills:
+Skill ID: 00038ad8-9bd1-47b4-8477-256e214a9f82
+Skill Name: UI/UX Research
+Confidence Score: 95
+Why: Extensive use of React, TailwindCSS, Radix UI components and many .tsx/.ts files across frontend repos (e.g., ai-video-frontend) shows strong UI/UX focus
+---
+Skill ID: 00a949db-60f6-4b55-b03b-7c89947d7ffa
+Skill Name: Page Layout
+Confidence Score: 90
+Why: HTML, CSS, SCSS, Tailwind and UI component libraries are used to craft page layouts; .html and .css file types are prominent
+---
+Skill ID: 01c28047-b36e-4570-b308-cae438790507
+Skill Name: Process Driven Development
+Confidence Score: 88
+Why: Multiple PRs, Dockerfiles, Vite build scripts and AWS deployment (boto3, awsebcli) indicate a disciplined, process‑oriented development workflow
+---
+Skill ID: 00f21500-dfc5-46ee-ae6f-c342a7032fe4
+Skill Name: Repository Pattern
+Confidence Score: 85
+Why: Backend services built with FastAPI, Pydantic and SQL files imply a structured data access layer commonly implemented via the Repository Pattern
+---
+Skill ID: 008a228f-6977-499e-b013-1c5b0591cf6e
+Skill Name: Data Storytelling
+Confidence Score: 82
+Why: Dependency on python-pptx and .pptx files shows generation of presentation‑style reports, aligning with data storytelling skills
+---
+Skill ID: 016c0ad0-78be-4469-8209-9adc6cc050b5
+Skill Name: StorybookJS
+Confidence Score: 80
+Why: React/TypeScript UI components are typical candidates for Storybook; the presence of UI libraries and component demos suggests Storybook usage even if not listed explicitly
+---
+Skill ID: 018202b0-3f2a-421d-a773-0b03ab37e373
+Skill Name: Hybrid Cloud Computing
+Confidence Score: 78
+Why: Heavy reliance on AWS SDKs (boto3, awscli) together with containerization suggests deployment across cloud environments, fitting hybrid cloud concepts
+---
+Skill ID: 01638ce3-c9d2-48df-9f1a-90d4dd3d68fb
+Skill Name: Component Analysis
+Confidence Score: 75
+Why: Use of Radix UI, React components and TypeScript indicates analysis and composition of reusable UI components
+---
+Skill ID: 003c3bc8-90d7-43aa-8c14-640abd594a4f
+Skill Name: Software Testing Life Cycle
+Confidence Score: 70
+Why: Regular PRs and commits imply testing activities; FastAPI projects typically include pytest or similar test suites even if not listed in dependencies
+---
+Skill ID: 01c2ec74-ed5f-4947-a4db-0ca6b2434d0d
+Skill Name: Query Planning
+Confidence Score: 68
+Why: Presence of .sql files and database‑related code suggests attention to query design and planning
+---
+
+Run Summary:
+Repos scanned: 10
+Contributions inspected: 238 commits, 8 PRs
+Total API calls: 341
+Elapsed time: 235.75 seconds
